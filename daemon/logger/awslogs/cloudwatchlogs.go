@@ -46,6 +46,7 @@ const (
 	forceFlushIntervalKey  = "awslogs-force-flush-interval-seconds"
 	maxBufferedEventsKey   = "awslogs-max-buffered-events"
 	logFormatKey           = "awslogs-format"
+	retryCountKey          = "awslogs-retry-count"
 
 	defaultForceFlushInterval = 5 * time.Second
 	defaultMaxBufferedEvents  = 4096
@@ -92,6 +93,7 @@ type logStreamConfig struct {
 	forceFlushInterval time.Duration
 	maxBufferedEvents  int
 	multilinePattern   *regexp.Regexp
+	retryCount         int
 }
 
 var _ logger.SizedLogger = &logStream{}
@@ -245,6 +247,17 @@ func newStreamConfig(info logger.Info) (*logStreamConfig, error) {
 	if err != nil {
 		return nil, err
 	}
+	
+	retryCount := 0 // Default to 0 which means use AWS SDK default
+	if info.Config[retryCountKey] != "" {
+		retryCount, err = strconv.Atoi(info.Config[retryCountKey])
+		if err != nil {
+			return nil, err
+		}
+		if retryCount < 0 {
+			return nil, fmt.Errorf("must specify a non-negative integer for log opt '%s': %v", retryCountKey, info.Config[retryCountKey])
+		}
+	}
 
 	containerStreamConfig := &logStreamConfig{
 		logStreamName:      logStreamName,
@@ -254,6 +267,7 @@ func newStreamConfig(info logger.Info) (*logStreamConfig, error) {
 		forceFlushInterval: forceFlushInterval,
 		maxBufferedEvents:  maxBufferedEvents,
 		multilinePattern:   multilinePattern,
+		retryCount:         retryCount,
 	}
 
 	return containerStreamConfig, nil
@@ -366,6 +380,19 @@ func newAWSLogsClient(info logger.Info, configOpts ...func(*config.LoadOptions) 
 
 		endpoint := fmt.Sprintf("%s%s", newSDKEndpoint, uri)
 		configOpts = append(configOpts, config.WithCredentialsProvider(endpointcreds.New(endpoint)))
+	}
+	
+	// Configure retry count if specified
+	if retryCountStr, ok := info.Config[retryCountKey]; ok && retryCountStr != "" {
+		retryCount, err := strconv.Atoi(retryCountStr)
+		if err == nil && retryCount >= 0 {
+			log.G(ctx).WithFields(log.Fields{
+				"retryCount": retryCount,
+			}).Debug("Setting custom retry count for AWS SDK")
+			
+			// Add retry configuration to the AWS SDK config options
+			configOpts = append(configOpts, config.WithRetryMaxAttempts(retryCount))
+		}
 	}
 
 	cfg, err := config.LoadDefaultConfig(context.TODO(), configOpts...)
@@ -751,6 +778,7 @@ func ValidateLogOpt(cfg map[string]string) error {
 		case forceFlushIntervalKey:
 		case maxBufferedEventsKey:
 		case logFormatKey:
+		case retryCountKey:
 		default:
 			return fmt.Errorf("unknown log opt '%s' for %s log driver", key, name)
 		}
@@ -771,6 +799,12 @@ func ValidateLogOpt(cfg map[string]string) error {
 	if cfg[maxBufferedEventsKey] != "" {
 		if value, err := strconv.Atoi(cfg[maxBufferedEventsKey]); err != nil || value <= 0 {
 			return fmt.Errorf("must specify a positive integer for log opt '%s': %v", maxBufferedEventsKey, cfg[maxBufferedEventsKey])
+		}
+	}
+	
+	if cfg[retryCountKey] != "" {
+		if value, err := strconv.Atoi(cfg[retryCountKey]); err != nil || value < 0 {
+			return fmt.Errorf("must specify a non-negative integer for log opt '%s': %v", retryCountKey, cfg[retryCountKey])
 		}
 	}
 	_, datetimeFormatKeyExists := cfg[datetimeFormatKey]

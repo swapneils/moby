@@ -71,16 +71,20 @@ func TestNewStreamConfig(t *testing.T) {
 		maxBufferedEvents  string
 		datetimeFormat     string
 		multilinePattern   string
+		retryCount         string
 		shouldErr          bool
 		testName           string
 	}{
-		{"", groupName, "", "", "", "", "", "", "", false, "defaults"},
-		{"", groupName, "invalid create group", "", "", "", "", "", "", true, "invalid create group"},
-		{"", groupName, "", "", "", "invalid flush interval", "", "", "", true, "invalid flush interval"},
-		{"", groupName, "", "", "", "", "invalid max buffered events", "", "", true, "invalid max buffered events"},
-		{"", groupName, "", "", "", "", "", "", "n{1001}", true, "invalid multiline pattern"},
-		{"", groupName, "", "", "", "15", "", "", "", false, "flush interval at 15"},
-		{"", groupName, "", "", "", "", "1024", "", "", false, "max buffered events at 1024"},
+		{"", groupName, "", "", "", "", "", "", "", "", false, "defaults"},
+		{"", groupName, "invalid create group", "", "", "", "", "", "", "", true, "invalid create group"},
+		{"", groupName, "", "", "", "invalid flush interval", "", "", "", "", true, "invalid flush interval"},
+		{"", groupName, "", "", "", "", "invalid max buffered events", "", "", "", true, "invalid max buffered events"},
+		{"", groupName, "", "", "", "", "", "", "n{1001}", "", true, "invalid multiline pattern"},
+		{"", groupName, "", "", "", "15", "", "", "", "", false, "flush interval at 15"},
+		{"", groupName, "", "", "", "", "1024", "", "", "", false, "max buffered events at 1024"},
+		{"", groupName, "", "", "", "", "", "", "", "5", false, "retry count at 5"},
+		{"", groupName, "", "", "", "", "", "", "", "-1", true, "invalid retry count"},
+		{"", groupName, "", "", "", "", "", "", "", "invalid", true, "invalid retry count string"},
 	}
 
 	for _, tc := range tests {
@@ -95,6 +99,7 @@ func TestNewStreamConfig(t *testing.T) {
 				logCreateStreamKey:    tc.logCreateStream,
 				datetimeFormatKey:     tc.datetimeFormat,
 				multilinePatternKey:   tc.multilinePattern,
+				retryCountKey:         tc.retryCount,
 			}
 
 			info := logger.Info{
@@ -113,6 +118,10 @@ func TestNewStreamConfig(t *testing.T) {
 				if tc.maxBufferedEvents != "" {
 					maxBufferedEvents, _ := strconv.Atoi(info.Config[maxBufferedEventsKey])
 					assert.Check(t, logStreamConfig.maxBufferedEvents == maxBufferedEvents, "Unexpected maxBufferedEvents")
+				}
+				if tc.retryCount != "" {
+					retryCount, _ := strconv.Atoi(info.Config[retryCountKey])
+					assert.Check(t, logStreamConfig.retryCount == retryCount, "Unexpected retryCount")
 				}
 			}
 		})
@@ -1698,4 +1707,72 @@ func TestNewAWSLogsClientCredentialEndpointDetect(t *testing.T) {
 	assert.Check(t, is.Contains(actualAuthHeader, "AWS4-HMAC-SHA256 Credential=test-access-key-id/"))
 	assert.Check(t, is.Contains(actualAuthHeader, "us-west-2"))
 	assert.Check(t, is.Contains(actualAuthHeader, "Signature="))
+}
+func TestValidateLogOptRetryCount(t *testing.T) {
+	tests := []struct {
+		retryCount string
+		shouldErr  bool
+		testName   string
+	}{
+		{"", false, "empty retry count"},
+		{"5", false, "valid retry count"},
+		{"0", false, "zero retry count"},
+		{"-1", true, "negative retry count"},
+		{"invalid", true, "invalid retry count string"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.testName, func(t *testing.T) {
+			cfg := map[string]string{
+				logGroupKey:  groupName,
+				retryCountKey: tc.retryCount,
+			}
+
+			err := ValidateLogOpt(cfg)
+			if tc.shouldErr {
+				assert.Check(t, err != nil, "Expected an error")
+			} else {
+				assert.Check(t, err == nil, "Unexpected error")
+			}
+		})
+	}
+}
+func TestNewAWSLogsClientRetryConfig(t *testing.T) {
+	tests := []struct {
+		retryCount string
+		testName   string
+	}{
+		{"", "default retry count"},
+		{"5", "custom retry count"},
+		{"0", "zero retry count"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.testName, func(t *testing.T) {
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				fmt.Fprintln(w, "{}")
+			}))
+			defer ts.Close()
+
+			info := logger.Info{
+				Config: map[string]string{
+					regionKey:    "us-east-1",
+					endpointKey:  ts.URL,
+					retryCountKey: tc.retryCount,
+				},
+			}
+
+			client, err := newAWSLogsClient(
+				info,
+				config.WithCredentialsProvider(credentials.StaticCredentialsProvider{
+					Value: aws.Credentials{AccessKeyID: "AKID", SecretAccessKey: "SECRET", SessionToken: "SESSION"},
+				}),
+			)
+			assert.NilError(t, err)
+
+			// We can't directly test the retry configuration as it's internal to the AWS SDK
+			// But we can at least verify the client was created successfully
+			assert.Check(t, client != nil, "Client should not be nil")
+		})
+	}
 }
