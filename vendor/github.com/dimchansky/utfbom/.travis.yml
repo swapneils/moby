@@ -17,6 +17,7 @@ cache:
 env:
   global:
     - GO111MODULE=on
+    - GOPROXY=direct
 
 before_install:
   - go get github.com/mattn/goveralls
